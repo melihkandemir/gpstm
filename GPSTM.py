@@ -2,9 +2,9 @@
 # The Gaussian Process Supervised Topic Model (GPSTM) code
 #
 # Copyright: Melih Kandemir
-# melih.kandemir@iwr.uni-heidelberg.de
+# melih.kandemir@ozyegin.edu.tr
 #
-# All rights reserved
+# Only non-commercial use granted.
 #
 import numpy as np
 import scipy
@@ -16,11 +16,12 @@ from sklearn.cluster import KMeans
 class GPSTM:
 
     # K: topic count, V: vocabulary size
-    def __init__(self,num_inducing=20,K=20,max_iter=10,burnin_iter=5,length_scale=1.0,noise_precision=10.0,lrate=0.01):
+    def __init__(self,isjoint=True,num_inducing=20,K=20,max_iter=10,length_scale=1.0,noise_precision=10.0,lrate=0.01):
         self.P = num_inducing;   self.kernel = RBFKernel(length_scale)
         self.K = K;  self.V = 1;   self.max_iter=max_iter;   
-        self.burnin_iter=burnin_iter; self.lrate=lrate
+        self.lrate=lrate
         self.noise_precision= noise_precision;   self.num_inducing = num_inducing
+        self.isjoint =  isjoint
         
     # Xtr: training input (data points in rows)
     # Ytr: training output (labels in rows)
@@ -45,14 +46,16 @@ class GPSTM:
         C = np.zeros([D,K])
         gC = np.zeros([D,K])
 
-        print "Training"
+        print("Training")
+        
+        initial_gp_update = False
 
         # Train LDA
         for ii in range(self.max_iter):  
             self.print_iter(ii)   
-            (beta,gam,phi)=self.lda_update(alpha,beta,gam,phi,Xtr,C,joint_update=(ii>self.burnin_iter))
-            
-            if ii==self.burnin_iter: # Compute inducing points only once!                        
+                                    
+            if self.isjoint and np.mod( (ii+1),10)==0:  
+                (beta,gam,phi)=self.lda_update(alpha,beta,gam,phi,Xtr,C,joint_update=True)  
                 for dd in range(D):
                     doc_means[dd,:] = phi[dd,:,:].dot(Xtr[dd,:])/word_cnt[dd]                
                 C = deepcopy(doc_means)           
@@ -67,47 +70,59 @@ class GPSTM:
                         Z = np.concatenate((Z,Z_rr))   
                 # calculate kernels
                 Kzz = self.kernel.selfCompute(Z)
-                Kzz_inv = self.safe_inv(Kzz)                
-                
-                (M,S,EKzc,EKzcKzcT)=self.gp_update(Kzz_inv,Z,C,Ytr,InpNoise)            
-            
-            if ii > self.burnin_iter:                            
-               for dd in range(D):
-                   doc_means[dd,:] = phi[dd,:,:].dot(Xtr[dd,:])/word_cnt[dd]  
-                       
-               if np.mod(ii-self.burnin_iter,2)==0:                     
-                   C = deepcopy(doc_means)                      
-               else:
-                                                
-                    # update GP params                            
-                    if ii>self.burnin_iter:
-                        lrnow=self.lrate
-                        for ppp in range(10):
-                            gC = -self.noise_precision*C + self.noise_precision*doc_means
-                        
-                            for kk in range(K):
-                                grad_EKcz = self.kernel.grad_EVzx_by_mu_batch(EKzc, Z, C, InpNoise, kk)      
-                                grad_EKzczcT_tensor = self.kernel.grad_EVzxVzxT_by_mu_batch(EKzcKzcT, Z, C, InpNoise, kk)
-                                Multiplier = Kzz_inv.dot(M.dot(M.T)+R*S).dot(Kzz_inv)-R*Kzz_inv
-                                Term2 = np.zeros([D,])
-                                for dd in range(D):
-                                    Term2[dd] = grad_EKzczcT_tensor[dd,:,:].dot(Multiplier).trace()
-                                
-                                gC[:,kk] += -0.5*np.float64(self.noise_precision)*Term2
-                                
-                                #print kk
-                                for rr in range(R):                                            
-                            
-                                    label_mat = np.tile(Ytr[:,rr],[P*R,1]).T                                                                
-                                    gC[:,kk]  +=  np.float64(self.noise_precision) * (label_mat*grad_EKcz).dot( Kzz_inv).dot(M[:,rr]).ravel()
-                           
-                            C = C + lrnow*gC
-                            lrnow *= 0.9
 
-		    (M,S,EKzc,EKzcKzcT)=self.gp_update(Kzz_inv,Z,C,Ytr,InpNoise)
+                Kzz_inv = self.safe_inv(Kzz)
+                               
+                if initial_gp_update==False:
+                    (M,S,EKzc,EKzcKzcT)=self.gp_update(Kzz_inv,Z,C,Ytr,InpNoise)
+                    initial_gp_update=True
+                              
+                # update GP params                            
+                gC = -self.noise_precision*C + self.noise_precision*doc_means
+            
+                for kk in range(K):
+                    grad_EKcz = self.kernel.grad_EVzx_by_mu_batch(EKzc, Z, C, InpNoise, kk)      
+                    grad_EKzczcT_tensor = self.kernel.grad_EVzxVzxT_by_mu_batch(EKzcKzcT, Z, C, InpNoise, kk)
+                    Multiplier = Kzz_inv.dot(M.dot(M.T)+R*S).dot(Kzz_inv)-R*Kzz_inv
+                    Term2 = np.zeros([D,])
+                    for dd in range(D):
+                        Term2[dd] = grad_EKzczcT_tensor[dd,:,:].dot(Multiplier).trace()
+                    
+                    gC[:,kk] += -0.5*np.float64(self.noise_precision)*Term2
+                    
+                    for rr in range(R):                                                            
+                        label_mat = np.tile(Ytr[:,rr],[P*R,1]).T                                                                
+                        gC[:,kk]  +=  np.float64(self.noise_precision) * (label_mat*grad_EKcz).dot( Kzz_inv).dot(M[:,rr]).ravel()
+               
+                C = C + self.lrate*gC               
+                #self.lrate *= 0.9
+                (M,S,EKzc,EKzcKzcT)=self.gp_update(Kzz_inv,Z,C,Ytr,InpNoise)              
+
+            else:
+                (beta,gam,phi)=self.lda_update(alpha,beta,gam,phi,Xtr,C,joint_update=False)
                 
+            
+        if self.isjoint == False:
+            for dd in range(D):
+                doc_means[dd,:] = phi[dd,:,:].dot(Xtr[dd,:])/word_cnt[dd]                
+            C = deepcopy(doc_means)           
+            kmmodel=KMeans(n_clusters=P, n_init=1,init='random')
+            
+            for rr in range(R):                    
+                kmmodel.fit(np.float32(C[Ytr[:,rr]==1,:]))                    
+                Z_rr = kmmodel.cluster_centers_
+                if rr == 0:
+                    Z = Z_rr
+                else:
+                    Z = np.concatenate((Z,Z_rr))   
+            # calculate kernels
+            Kzz = self.kernel.selfCompute(Z)
+            Kzz_inv = self.safe_inv(Kzz)          
+            
+            (M,S,EKzc,EKzcKzcT)=self.gp_update(Kzz_inv,Z,C,Ytr,InpNoise)
+         
         # save the learned params
-        self.M = M;  self.S = S;  self.Z = Z;  self.Kzz_inv = Kzz_inv
+        self.M = M;  self.S = S;  self.Z = Z;  self.Kzz_inv = Kzz_inv; self.Kzz = Kzz
         self.gam = gam;  self.beta = beta;  self.alpha = alpha
 
     def lda_update(self,alpha,beta,gam,phi,X,C,update_beta=True,joint_update=False):  
@@ -151,10 +166,10 @@ class GPSTM:
         return (M,S,EKzc,EKzcKzcT)
         
     def print_iter(self,ii):
-        if (ii>0 and np.mod(ii,10)==0) or ii==(self.max_iter-1):
-            print ". %d" % ii
-        elif ii>0:
-            print ".", 
+        if np.mod(ii+1,10)==0 or ii==(self.max_iter-1):
+            print(". %d" % (ii+1))
+        else:
+            print(".", end="")
             sys.stdout.flush()        
            
     def safe_inv(self,M):
@@ -168,12 +183,13 @@ class GPSTM:
         phi = np.random.random([D,K,V])
         phi = phi / np.swapaxes(np.tile(np.sum(phi,axis=1),[K,1,1]),0,1)
         
-        print "Predicting"
-        
-        for ii in range(self.max_iter):  
+        print("Predicting")
+        for ii in range(20):  
             self.print_iter(ii)   
             (dummy,gam,phi)=self.lda_update(self.alpha,self.beta,gam,phi,Xts,\
                                             None,update_beta=False,joint_update=False)
+                                            
+        print("")
         Cts = np.zeros([D,K])
         for dd in range(D):
             Cts[dd,:]= phi[dd,:].dot(Xts[dd,:])/word_cnt[dd]

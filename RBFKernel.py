@@ -295,8 +295,10 @@ class RBFKernel:
         
         N=A.shape[0]
                         
-        myFunct = self.EVzxVzxT_single_closure(Z,A,B)
-        mapped = np.array(map(myFunct, range(N)))        
+        #myFunct = self.EVzxVzxT_single_closure(Z,A,B)
+        #mapped = np.array(map(myFunct, range(N)))   
+        
+        mapped = [self.EVzxVzxT_single(Z,A,B,i) for i in range(N)]
         
         return mapped
         
